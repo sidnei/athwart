@@ -136,8 +136,10 @@ class AthwartOptions(OptionsGlue):
          "The host where the scribe collector is listening.", str],
         ["scribe-port", "p", 9410,
          "The port where the scribe collector is listening.", int],
-        ["listen-port", "l", 8725,
-         "The UDP port where we will listen.", int],
+        ["logstash-listen-port", "l", 8725,
+         "The UDP port where we will listen for Logstash messages.", int],
+        ["span-listen-port", "l", 8726,
+         "The UDP port where we will listen for base64 Zipkin span.", int],
         ["monitor-message", "m", "athwart ping",
          "Message we expect from monitoring agent.", str],
         ["monitor-response", "o", "athwart pong",
@@ -190,7 +192,6 @@ class AthwartService(Service):
 
 def createService(options):
     from tryfer.tracers import (
-        push_tracer,
         DebugTracer,
         EndAnnotationTracer,
         ZipkinTracer)
@@ -198,21 +199,36 @@ def createService(options):
     from twisted.internet.endpoints import TCP4ClientEndpoint
     from scrivener import ScribeClient
 
+    from athwart.processor import HAProxyProcessor, SpanProcessor
+
     root_service = MultiService()
     root_service.setName("athwart")
 
-    if 1:  # options["dump-mode"]:
-        push_tracer(EndAnnotationTracer(DebugTracer(sys.stdout)))
+    tracers = []
+    if options["dump-mode"]:
+        tracers.append(EndAnnotationTracer(DebugTracer(sys.stdout)))
 
     client = ScribeClient(TCP4ClientEndpoint(
         reactor, options["scribe-host"], options["scribe-port"]))
-    push_tracer(ZipkinTracer(client))
+    tracers.append(ZipkinTracer(client))
 
-    protocol = AthwartServerProtocol(
+    haproxy_processor = HAProxyProcessor(tracers)
+    logstash_input = AthwartServerProtocol(
+        haproxy_processor,
         monitor_message=options["monitor-message"],
         monitor_response=options["monitor-response"])
 
-    listener = UDPServer(options["listen-port"], protocol)
-    listener.setServiceParent(root_service)
+    logstash_listener = UDPServer(options["logstash-listen-port"],
+                                  logstash_input)
+    logstash_listener.setServiceParent(root_service)
+
+    span_processor = SpanProcessor(client)
+    span_input = AthwartServerProtocol(
+        span_processor,
+        monitor_message=options["monitor-message"],
+        monitor_response=options["monitor-response"])
+
+    span_listener = UDPServer(options["span-listen-port"], span_input)
+    span_listener.setServiceParent(root_service)
 
     return root_service
